@@ -1,103 +1,105 @@
 #include <coroutine>
+#include <exception>
 #include <iostream>
-
-template <class T> class Task;
-
-template <class T> struct Promise {
-  Task<T> get_return_object() {
-    return Task<T>(std::coroutine_handle<Promise<T>>::from_promise(*this));
-  }
-  std::suspend_always initial_suspend() { return {}; }
-  std::suspend_always final_suspend() noexcept { return {}; }
-  void return_value(T value) { this->value = std::move(value); }
-  void unhandled_exception() { std::terminate(); }
-  T value;
-};
-
-template <class T> class Task {
+class task {
 public:
-  using promise_type = Promise<T>;
-
-  Task(std::coroutine_handle<Promise<T>> h) : coro(h) {}
-
-  ~Task() {
-    if (coro) {
-      coro.destroy();
-    }
-  }
-
-  void resume() {
-    if (coro && !coro.done()) {
-      coro.resume();
-    }
-  }
-
-  T get_result() {
-    if (coro && coro.done()) {
-      return coro.promise().value;
-    }
-    throw std::runtime_error("Coroutine not completed");
-  }
-
-  // Helper method to check handle state
-  void check_handle_state(const std::string &label) const {
-    std::cout << "[" << label << "] ";
-    if (coro) {
-      std::cout << "Handle valid, ";
-      if (coro.done()) {
-        std::cout << "Coroutine completed";
-      } else {
-        std::cout << "Coroutine not completed";
+  struct final_awaiter {
+    bool await_ready() noexcept { return false; }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept {
+      if (continue_handle_) {
+        return continue_handle_;
       }
-    } else {
-      std::cout << "Handle invalid";
+      return std::noop_coroutine(); // 没有继续的协程 直接返回空句柄，返回主程序
     }
-    std::cout << std::endl;
-  }
+    void await_resume() noexcept {} // 返回值被忽略
 
-  std::coroutine_handle<Promise<T>> coro;
+    std::coroutine_handle<> continue_handle_;
+  };
+
+  struct promise_type {
+    task get_return_object() {
+      return task{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+    std::suspend_always initial_suspend() { return {}; }
+    template <typename T> void return_value(T &&value) {
+      std::cout << "return_value: " << value << std::endl;
+    }
+    void unhandled_exception() noexcept {
+      auto exception = std::current_exception();
+      std::rethrow_exception(exception);
+    }
+    auto final_suspend() noexcept { return final_awaiter{continuation_}; }
+
+    std::coroutine_handle<> continuation_;
+  };
+
+  struct awaiter {
+    bool await_ready() noexcept { return false; }
+    std::coroutine_handle<>
+    await_suspend(std::coroutine_handle<> parent) noexcept {
+      handle_.promise().continuation_ = parent;
+      return handle_;
+    }
+    int await_resume() noexcept { return 42; }
+    explicit awaiter(std::coroutine_handle<promise_type> handle)
+        : handle_(handle) {}
+    std::coroutine_handle<promise_type> handle_;
+  };
+
+  awaiter operator co_await() { return awaiter{handle_}; }
+
+  explicit task(std::coroutine_handle<promise_type> handle) : handle_(handle) {}
+
+  ~task() {
+    if (handle_ && handle_.done()) {
+      handle_.destroy();
+    }
+  }
+  void start() {
+    if (handle_) {
+      handle_.resume();
+    }
+  }
+  std::coroutine_handle<> handle() { return handle_; }
+
+private:
+  std::coroutine_handle<promise_type> handle_;
+};
+// final_suspend 必须noexcept 不允许异常破坏协程清理
+// unhandled_exception 必须noexcept 异常处理中不能再抛出异常
+
+struct Awaiter {
+  bool await_ready() noexcept {
+    std::cout << "await_ready" << std::endl;
+    return false;
+  }
+  std::coroutine_handle<>
+  await_suspend(std::coroutine_handle<> handle) noexcept {
+    std::cout << "handle:" << handle.address() << std::endl;
+    std::cout << "await_suspend" << std::endl;
+    return handle;
+  }
+  void await_resume() noexcept { std::cout << "await_resume" << std::endl; }
 };
 
-Task<int> func() {
-  std::cout << "Coroutine started..." << std::endl;
-  co_return 42;
+task func2() {
+  std::cout << "func2" << std::endl;
+  co_await Awaiter{};
+  std::cout << "func2 after await" << std::endl;
+  co_return "csaniucsa";
+}
+
+task func() {
+  std::cout << "func" << std::endl;
+  co_await func2();
+  std::cout << "func after await" << std::endl;
+  co_return "csaniucsa";
 }
 
 int main() {
-  std::cout << "=== Coroutine Handle State Demo ===" << std::endl;
+  auto coro = func();
 
-  // 1. Create coroutine
-  auto task = func();
-  task.check_handle_state("After creation");
-
-  // 2. Resume coroutine execution
-  task.resume();
-  task.check_handle_state("After resume");
-
-  // 3. Get result
-  try {
-    int result = task.get_result();
-    std::cout << "Coroutine result: " << result << std::endl;
-    task.check_handle_state("After getting result");
-  } catch (const std::exception &e) {
-    std::cout << "Error: " << e.what() << std::endl;
-  }
-
-  // 4. Manually destroy coroutine
-  if (task.coro) {
-    std::cout << "Manually destroying coroutine..." << std::endl;
-    task.coro.destroy();
-    task.check_handle_state("After destruction");
-  }
-
-  // 5. Try to access destroyed coroutine
-  try {
-    task.resume(); // This will not execute any operation
-    std::cout << "Attempting to resume destroyed coroutine" << std::endl;
-  } catch (...) {
-    std::cout << "Exception occurred when accessing destroyed coroutine"
-              << std::endl;
-  }
+  coro.start();
 
   return 0;
 }
