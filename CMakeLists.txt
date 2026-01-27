@@ -14,7 +14,7 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 add_executable(xcoro main.cpp)
-
+target_include_directories(xcoro PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 enable_testing()
 
@@ -23,6 +23,7 @@ set(TEST_FILES
 )
 add_executable(xcoro_test ${TEST_FILES})
 target_link_libraries(xcoro_test GTest::gtest_main)
+
 
 include(GoogleTest)
 gtest_discover_tests(xcoro_test)
