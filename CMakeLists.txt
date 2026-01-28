@@ -19,11 +19,11 @@ target_include_directories(xcoro PRIVATE ${CMAKE_SOURCE_DIR}/include)
 enable_testing()
 
 set(TEST_FILES
-  "tests/promise_test.cpp"
+  "tests/task_test.cpp"
 )
 add_executable(xcoro_test ${TEST_FILES})
 target_link_libraries(xcoro_test GTest::gtest_main)
-
+target_include_directories(xcoro_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 include(GoogleTest)
 gtest_discover_tests(xcoro_test)
