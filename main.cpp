@@ -1,25 +1,31 @@
+
+#include "xcoroutine/awaitable_traits.hpp"
+#include "xcoroutine/sync_wait.hpp"
 #include "xcoroutine/task.hpp"
 #include <iostream>
+#include <sys/stat.h>
+#include <type_traits>
 
 class Data {
 public:
   Data() {}
-  Data(const Data &) { std::cout << "Data(const Data &)\n"; }
-  Data(Data &&) { std::cout << "Data(Data &&)\n"; }
+  Data(const Data &) { std::cout << "Data copy constructor" << '\n'; }
+  Data &operator=(const Data &) {
+    std::cout << "Data copy assignment operator" << '\n';
+    return *this;
+  }
+  Data(Data &&) { std::cout << "Data move constructor" << '\n'; }
+  Data &operator=(Data &&) {
+
+    std::cout << "Data move assignment operator" << '\n';
+    return *this;
+  }
 };
+Data data;
+xcoro::task<Data &> getData() { co_return data; }
 
-xcoro::task<Data> getName() { co_return Data{}; }
-xcoro::task<int> compute(int x, int y) {
-  Data data = co_await getName();
-  // 有移动构造调用移动构造
-  std::cout << "compute(int x, int y) move constructor\n";
-  // std::cout << str << '\n';
-  co_return x + y;
+int main() {
+  std::cout << &data << '\n';
+  Data &ret = xcoro::sync_wait(getData());
+  std::cout << &ret << '\n';
 }
-
-Data &&getData() {
-  Data data;
-  return std::move(data);
-}
-
-int main() { Data &&data = getData(); }

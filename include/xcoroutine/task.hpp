@@ -64,12 +64,10 @@ public:
     if constexpr (std::is_reference_v<T>) {
       result_.template emplace<value_type>(std::addressof(value));
     } else {
-      //   std::cout << "return_value(U &&value) noexcept\n";
 
       result_.template emplace<T>(std::forward<U>(value));
     }
   }
-
   void unhandled_exception() noexcept {
     result_.template emplace<std::exception_ptr>(std::current_exception());
   }
@@ -100,11 +98,11 @@ public:
         return static_cast<T>(*std::get<value_type>(result_));
       } else if constexpr (std::is_move_constructible_v<T>) {
         // 具有移动构造函数，直接移动构造
-        std::cout << "result() move constructor\n";
         return std::move(std::get<value_type>(result_));
       } else {
         // 没有移动构造
         // 返回常量右值引用，右值引用也是引用，同样避免拷贝
+        // 一般不触发
         return static_cast<const T &&>(std::get<value_type>(result_));
       }
     } else if (std::holds_alternative<std::exception_ptr>(result_)) {
@@ -119,7 +117,9 @@ private:
 };
 
 // 特化void版本
-template <> class task_promise<void> {
+template <> class task_promise<void> final : public task_promise_base {
+public:
+  task_promise() = default;
   task_promise(task_promise &&) = delete;
   task_promise(const task_promise &) = delete;
   task_promise &operator=(const task_promise &) = delete;
@@ -173,7 +173,6 @@ public:
     }
   }
 
-  // 用作测试，获取协程句柄
   std::coroutine_handle<detail::task_promise<T>> handle() const noexcept {
     return handle_;
   }
@@ -188,9 +187,9 @@ public:
   }
 
   auto operator co_await() const && noexcept {
+
     struct awaitable : public awaitbale_base {
       decltype(auto) await_resume() {
-        // std::cout << "await_resume() move constructor\n";
         return std::move(this->coroutine_.promise())
             .result(); // 调用右值版本的result函数
                        // 返回 T&， const T&&
