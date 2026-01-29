@@ -141,7 +141,7 @@ private:
 
 } // namespace detail
 
-template <typename T> class [[nodiscard]] task {
+template <typename T = void> class [[nodiscard]] task {
 public:
   using promise_type = detail::task_promise<T>;
   explicit task(std::coroutine_handle<detail::task_promise<T>> handle) {
