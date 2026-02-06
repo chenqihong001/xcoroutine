@@ -75,36 +75,14 @@ public:
     return completion_notifier{};
   }
 
-  decltype(auto) result() & {
+  T result() {
     if (std::holds_alternative<value_type>(result_)) {
       if constexpr (std::is_reference_v<T>) {
-        // 通过decltype(auto) + return static_cast<T> 满足返回T&类型和const
-        // T&类型
+        // T 是引用类型，直接返回引用
         return static_cast<T>(*std::get<value_type>(result_));
       } else {
-        // 即使T不是引用类型，则返回const T &，去避免拷贝
-        return static_cast<const T &>(std::get<value_type>(result_));
-      }
-    } else if (std::holds_alternative<std::exception_ptr>(result_)) {
-      std::rethrow_exception(std::get<std::exception_ptr>(result_));
-    } else {
-      // 其他情况，例如std::monostate，直接返回
-      throw std::runtime_error("Task result not ready");
-    }
-  }
-
-  // 用于场景 co_await promise{};
-  decltype(auto) result() && {
-    if (std::holds_alternative<value_type>(result_)) {
-      if constexpr (std::is_reference_v<T>) {
-        return static_cast<T>(*std::get<value_type>(result_));
-      } else if constexpr (std::is_move_constructible_v<T>) {
-        // 具有移动构造函数，直接移动构造
+        // T 是值类型，移动返回
         return std::move(std::get<value_type>(result_));
-      } else {
-        // 没有移动构造
-        // 返回常量右值引用，右值引用也是引用，同样避免拷贝
-        return static_cast<const T &&>(std::get<value_type>(result_));
       }
     } else if (std::holds_alternative<std::exception_ptr>(result_)) {
       std::rethrow_exception(std::get<std::exception_ptr>(result_));
@@ -184,7 +162,7 @@ sync_wait_task_promise<void>::get_return_object() noexcept {
       std::coroutine_handle<sync_wait_task_promise<void>>::from_promise(*this));
 }
 
-template <concepts::Awaitable T, typename R = await_result_t<T>>
+template <concepts::Awaitable T, typename R = awaiter_result_t<T>>
 static auto make_sync_wait_task(T &&awaitable) -> sync_wait_task<R> {
   if constexpr (std::is_void_v<R>) {
     co_await std::forward<T>(awaitable);
@@ -196,7 +174,7 @@ static auto make_sync_wait_task(T &&awaitable) -> sync_wait_task<R> {
 
 } // namespace detail
 
-template <concepts::Awaitable T, typename R = await_result_t<T>>
+template <concepts::Awaitable T, typename R = awaiter_result_t<T>>
 decltype(auto) sync_wait(T &&awaitable) {
   // sync_wait的职责是运行make_sync_wait_task协程，去执行awaitable，并收集结果，在任务未完成时，阻塞
   detail::sync_wait_event event;

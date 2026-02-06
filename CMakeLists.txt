@@ -20,6 +20,7 @@ enable_testing()
 
 set(TEST_FILES
   "tests/task_test.cpp"
+  "tests/awaitable_traits_test.cpp"
 )
 add_executable(xcoro_test ${TEST_FILES})
 target_link_libraries(xcoro_test GTest::gtest_main)
