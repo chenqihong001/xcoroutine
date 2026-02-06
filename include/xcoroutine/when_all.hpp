@@ -2,12 +2,13 @@
 #include "awaitable_traits.hpp"
 #include "concepts/awaitable.hpp"
 #include "utils/void_value.hpp"
-#include <algorithm>
 #include <atomic>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 namespace xcoro {
@@ -24,8 +25,12 @@ public:
     return count_.load(std::memory_order_acquire) == 1;
   }
 
-  bool try_await(std::coroutine_handle<> awaiting_coroutine) noexcept {
+  void set_awaiting_coroutine(
+      std::coroutine_handle<> awaiting_coroutine) noexcept {
     awaiting_coroutine_ = awaiting_coroutine;
+  }
+
+  bool try_await() noexcept {
     return count_.fetch_sub(1, std::memory_order_acq_rel) > 1;
     // return true 表示还有任务未完成 父协程继续挂起
     // return false 表示所有任务已完成  返回执行父协程
@@ -35,7 +40,9 @@ public:
   void notify_awaitable_completed() noexcept {
     if (count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
       // 所有任务执行结束
-      awaiting_coroutine_.resume(); // 恢复等待/父协程
+      if (awaiting_coroutine_) {
+        awaiting_coroutine_.resume(); // 恢复等待/父协程
+      }
     }
   }
 
@@ -62,7 +69,7 @@ class when_all_ready_awaitable<std::tuple<Task...>> {
 public:
   explicit when_all_ready_awaitable(Task &&...tasks) noexcept(
       std::conjunction_v<std::is_nothrow_move_constructible<Task>...>)
-      : latch_(sizeof...(Task)), tasks_(std::move(tasks)...) {}
+      : latch_(sizeof...(Task)), tasks_(std::forward<Task>(tasks)...) {}
 
   explicit when_all_ready_awaitable(std::tuple<Task...> &&tasks) noexcept(
       std::conjunction_v<std::is_nothrow_move_constructible<Task>...>)
@@ -70,7 +77,8 @@ public:
 
   auto operator co_await() & noexcept {
     struct awaiter {
-      awaiter(when_all_ready_awaitable &awaitbale) : awaitable_(awaitbale) {}
+      explicit awaiter(when_all_ready_awaitable &awaitable)
+          : awaitable_(awaitable) {}
       bool await_ready() const noexcept { return awaitable_.is_ready(); }
       bool await_suspend(std::coroutine_handle<> handle) noexcept {
         return awaitable_.try_await(handle);
@@ -102,7 +110,8 @@ public:
 
   auto operator co_await() && noexcept {
     struct awaiter {
-      awaiter(when_all_ready_awaitable &awaitbale) : awaitable_(awaitbale) {}
+      explicit awaiter(when_all_ready_awaitable &awaitable)
+          : awaitable_(awaitable) {}
       bool await_ready() const noexcept { return awaitable_.is_ready(); }
       bool await_suspend(std::coroutine_handle<> handle) noexcept {
         return awaitable_.try_await(handle);
@@ -120,8 +129,8 @@ public:
         return std::apply(
             [](auto &...tasks) {
               return std::tuple<typename std::remove_reference_t<
-                  decltype(tasks)>::promise_type::value_type &&...>{
-                  std::move(tasks.promise().result())...};
+                  decltype(tasks)>::promise_type::value_type...>{
+                  std::move(tasks).promise().result()...};
             },
             awaitable_.tasks_);
       }
@@ -135,9 +144,10 @@ public:
 private:
   bool is_ready() const noexcept { return latch_.is_ready(); }
   bool try_await(std::coroutine_handle<> handle) noexcept {
-    std::apply([this](auto &&...tasks) { ((tasks.start(latch_)), ...); },
+    latch_.set_awaiting_coroutine(handle);
+    std::apply([this](auto &...tasks) { ((tasks.start(latch_)), ...); },
                tasks_);
-    return latch_.try_await(handle);
+    return latch_.try_await();
   }
 
   when_all_latch latch_;
@@ -147,7 +157,14 @@ private:
 // R -> const T & , T , T&  void类型
 template <typename R> class when_all_task_promise {
 public:
-  when_all_task_promise() noexcept {}
+  using value_type = std::conditional_t<std::is_reference_v<R>, R,
+                                        std::remove_const_t<R>>;
+  using storage_type =
+      std::conditional_t<std::is_reference_v<R>,
+                         std::add_pointer_t<std::remove_reference_t<R>>,
+                         std::remove_const_t<R>>;
+
+  when_all_task_promise() noexcept = default;
 
   when_all_task<R> get_return_object() noexcept;
   std::suspend_always initial_suspend() noexcept { return {}; }
@@ -158,36 +175,52 @@ public:
       bool await_ready() const noexcept { return false; }
       void await_suspend(
           std::coroutine_handle<when_all_task_promise> handle) noexcept {
-        handle.promise().latch_->notify_awaitable_completed();
+        if (handle.promise().latch_) {
+          handle.promise().latch_->notify_awaitable_completed();
+        }
       }
       void await_resume() noexcept {}
     };
     return completion_notifier{};
   }
 
-  void unhandled_exception() noexcept { result_ = std::current_exception(); }
-
-  // 只会传入右值版本
-  auto yield_value(R &&result) noexcept {
-    result_ = std::move(result);
-    return final_suspend(); // 手动调用final_suspend()，处理latch的减少
+  void unhandled_exception() noexcept {
+    result_.template emplace<std::exception_ptr>(std::current_exception());
   }
 
-  // result() 函数，返回value_type引用
-  // value_type &result() & noexcept { return *result_; }
-  // value_type &&result() && noexcept { return std::move(*result_); }
-
-  auto result() noexcept {
-    if constexpr (std::holds_alternative<std::remove_cvref_t<R>>(result_)) {
-      return std::move(std::get<std::remove_cvref_t<R>>(result_));
+  template <typename U>
+    requires std::is_constructible_v<R, U &&>
+  void return_value(U &&value) noexcept {
+    if constexpr (std::is_reference_v<R>) {
+      result_.template emplace<storage_type>(std::addressof(value));
     } else {
+      result_.template emplace<storage_type>(std::forward<U>(value));
+    }
+  }
+
+  void rethrow_if_exception() {
+    if (std::holds_alternative<std::exception_ptr>(result_)) {
       std::rethrow_exception(std::get<std::exception_ptr>(result_));
     }
   }
 
-  // 检查并重新抛出异常
+  decltype(auto) result() & {
+    rethrow_if_exception();
+    if constexpr (std::is_reference_v<R>) {
+      return static_cast<R>(*std::get<storage_type>(result_));
+    } else {
+      return std::get<storage_type>(result_);
+    }
+  }
 
-  void return_void() noexcept {}
+  decltype(auto) result() && {
+    rethrow_if_exception();
+    if constexpr (std::is_reference_v<R>) {
+      return static_cast<R>(*std::get<storage_type>(result_));
+    } else {
+      return std::move(std::get<storage_type>(result_));
+    }
+  }
 
   void start(when_all_latch &latch) noexcept {
     latch_ = &latch;
@@ -196,23 +229,61 @@ public:
 
 private:
   when_all_latch *latch_ = nullptr;
-  std::variant<std::remove_cvref_t<R>, std::exception_ptr> result_;
-};
-
-// 特化T&
-template <typename R> class when_all_task_promise<R &> {
-public:
-private:
-  when_all_latch *latch_ = nullptr;
-  std::variant<std::add_pointer_t<R>, std::exception_ptr> result_;
+  std::variant<std::monostate, storage_type, std::exception_ptr> result_;
 };
 
 // 特化void
 template <> class when_all_task_promise<void> {
 public:
+  using value_type = void_value;
+
+  when_all_task_promise() noexcept = default;
+  when_all_task<void> get_return_object() noexcept;
+  std::suspend_always initial_suspend() noexcept { return {}; }
+
+  auto final_suspend() noexcept {
+    struct completion_notifier {
+      bool await_ready() const noexcept { return false; }
+      void await_suspend(
+          std::coroutine_handle<when_all_task_promise> handle) noexcept {
+        if (handle.promise().latch_) {
+          handle.promise().latch_->notify_awaitable_completed();
+        }
+      }
+      void await_resume() noexcept {}
+    };
+    return completion_notifier{};
+  }
+
+  void unhandled_exception() noexcept { exception_ = std::current_exception(); }
+
+  void return_void() noexcept {}
+
+  void rethrow_if_exception() {
+    if (exception_) {
+      std::rethrow_exception(exception_);
+    }
+  }
+
+  value_type &result() & {
+    rethrow_if_exception();
+    return value_;
+  }
+
+  value_type &&result() && {
+    rethrow_if_exception();
+    return std::move(value_);
+  }
+
+  void start(when_all_latch &latch) noexcept {
+    latch_ = &latch;
+    std::coroutine_handle<when_all_task_promise>::from_promise(*this).resume();
+  }
+
 private:
   when_all_latch *latch_ = nullptr;
   std::exception_ptr exception_;
+  value_type value_{};
 };
 
 // R -> const T & , T , T&  void
@@ -248,8 +319,11 @@ public:
     }
   }
 
-private:
   void start(when_all_latch &latch) noexcept { handle_.promise().start(latch); }
+  promise_type &promise() & noexcept { return handle_.promise(); }
+  promise_type &&promise() && noexcept { return std::move(handle_.promise()); }
+
+private:
   std::coroutine_handle<promise_type> handle_;
 };
 
@@ -257,6 +331,12 @@ template <typename T>
 when_all_task<T> when_all_task_promise<T>::get_return_object() noexcept {
   return when_all_task<T>{
       std::coroutine_handle<when_all_task_promise<T>>::from_promise(*this)};
+}
+
+inline when_all_task<void>
+when_all_task_promise<void>::get_return_object() noexcept {
+  return when_all_task<void>{
+      std::coroutine_handle<when_all_task_promise<void>>::from_promise(*this)};
 }
 
 template <concepts::Awaitable Awaitable,
@@ -268,7 +348,7 @@ when_all_task<R> make_when_all_task(Awaitable &&awaitable) {
     co_await std::forward<Awaitable>(awaitable);
     co_return;
   } else {
-    co_yield co_await std::forward<Awaitable>(awaitable);
+    co_return co_await std::forward<Awaitable>(awaitable);
   }
 }
 
@@ -277,8 +357,9 @@ when_all_task<R> make_when_all_task(Awaitable &&awaitable) {
 template <concepts::Awaitable... Awaitables>
 [[nodiscard]] auto when_all(Awaitables &&...awaitables) {
   return detail::when_all_ready_awaitable<
-      std::tuple<detail::when_all_task<awaiter_result_t<Awaitables>>>...>(
-      std::make_tuple(detail::make_when_all_task(std::move(awaitables))...));
+      std::tuple<detail::when_all_task<awaiter_result_t<Awaitables>>...>>(
+      std::make_tuple(
+          detail::make_when_all_task(std::forward<Awaitables>(awaitables))...));
 }
 
 } // namespace xcoro

@@ -3,6 +3,7 @@
 #include "concepts/awaitable.hpp"
 #include "utils/nocopyable.hpp"
 #include <atomic>
+#include <condition_variable>
 #include <coroutine>
 #include <exception>
 #include <mutex>
