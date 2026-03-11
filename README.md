@@ -1,157 +1,264 @@
+# xcoro
 
-## Cancellation取消机制
+`xcoro` 是一个基于 C++20 协程的轻量协程库，设计方向参考了 `cppcoro` / `libcoro`：  
+提供可组合的 awaitable 抽象、同步原语、取消机制和基础网络 I/O 能力。
+
+当前仓库以“头文件实现 + 测试驱动”方式维护，适合学习协程模型与构建中小型异步组件。
+
+## Overview
+
+已实现的核心能力：
+
+- Coroutine types
+  - `task<T>`
+  - `generator<T>`
+- Composition
+  - `sync_wait(awaitable)`
+  - `when_all(awaitables...)`
+  - `when_any(awaitables...)`
+  - `when_any(range)`
+- Cancellation
+  - `cancellation_source`
+  - `cancellation_token`
+  - `cancellation_registration`
+  - `operation_cancelled`
+- Synchronization primitives
+  - `manual_reset_event` / `event`
+  - `counting_semaphore` / `semaphore` / `binary_semaphore`
+  - `mutex`
+  - `condition_variable`
+  - `latch`
+- Networking (Linux)
+  - `net::io_context` (epoll + eventfd)
+  - `net::socket`
+  - `net::acceptor`
+  - `net::resolver`
+  - `net::endpoint`
+  - `net::byte_buffer`, `mutable_buffer`, `const_buffer`
+- Scheduler-like utility
+  - `thread_pool`（实验接口）
+
+## Requirements
+
+- C++20 编译器（建议 `GCC 13+` 或同等级 Clang）
+- CMake（仓库当前测试配置使用 `3.10+`）
+- Linux（网络模块依赖 `epoll/eventfd`）
+- `pthread`（编译/链接时建议加 `-pthread`）
+
+## Quick Start
+
+### 1) 最小示例：`task + sync_wait`
+
 ```cpp
-class callback_state;
-- void invoke() 执行回调
+#include <iostream>
 
-- std::function<void()>callback 回调函数
-- std::atomic<bool> invoked{false} 标记是否已经执行过回调了
+#include "xcoro/sync_wait.hpp"
+#include "xcoro/task.hpp"
 
+xcoro::task<int> twice(int x) {
+  co_return x * 2;
+}
 
-class cancellation_state;
-- bool is_cancellation_requested() 是否已经请求cancel
-- bool try_add_callback(const std::shared_ptr<callback_state>&cb) 尝试添加回调函数
-- void remove_callback(const std::shared_ptr<callback_state>&cb) 删除指定回调函数
-- bool request_cancellation() 请求cancel并执行所有回调
-
-- std::atomic<bool> cancelled{false} 标记是否请求cancel
-- std::mutex mutex_ 锁callbacks_数组
-- std::vector<std::shared_ptr<callback_state>> callbacks_
-
-- cancellation_state 一个cancellation状态，持有多个取消回调函数
-
-
-class cancellation_registration;
-- cancellation_registration(const cancellation_token& token,Callback&& callback) 在构造函数的时候就要注册指定state的callback
-- void deregister() 通过state_指针获得关联的cancellation_state状态，调用state_->remove_callback(callback)删除state中该registration对应的callback，然后reset state_指针，callback_指针
-- bool is_registered() 该registration是否注册了callback
-
-- void register_callback(const cancellation_token& token,Callback&& callback) 
-- std::shared_ptr<detail::cancellation_state> state_ 关联一个cancellation状态
-- std::shared_ptr<detail::callback_state> callback_ 对应一个callback回调函数
-
-- cancellation_registration 关联一个cancellation状态，对应一个callback回调函数
-
-
-
-class cancellation_token;
-- bool can_be_cancelled() 返回state_是否有效，也就是是否正确关联cancellation_state
-- bool is_cancellation_requested() 通过调用关联的state_的同名函数获取是否已经请求cancel
-
-- std::shared_ptr<detail::cancellation_state> state_ 关联一个state不持有
-
-- cancellation_token 关联一个state_
-
-
-class cancellation_token::awaiter;
-- awaiter(cancellation_token token) 
-- bool await_ready() {return !token_.can_be_cancelled() || token_.is_cancellation_requested()} 如果该token没有正确关联state或者关联的state已经request cancellation，那么就直接恢复协程，不挂起
-- bool await_suspend(std::coroutine_handle<> awaiting) 进入该函数表明该token关联的state没有请求cancellation，挂起协程，保存协程句柄，注册cancellation_registration  回调函数（该回调函数中会保存协程句柄，并负责恢复协程执行）
-
-- cancellation_token token_
-- cancellation_registration registration_
-- std::coroutine_handle<> awaiting_
-
-
-class cancellation_source;
-- cancellation_source() 创建一个cancellation_state对象
-- cancellation_token token() 创建一个关联state_的cancellation_token
-- bool request_cancellation() 请求cancellation/request cancellation
-
-- std::shared_ptr<detail::cancellation_state> state_ 持有一个state
-
-
-class operation_cancelled : public std::exception;
-- const char* what() 返回"operation cancelled"
-
-void throw_if_cancellation_requested(const cancellation_token & token) 如果token关联的state请求cancel，则抛出异常
-
+int main() {
+  int v = xcoro::sync_wait(twice(21));
+  std::cout << v << "\n";  // 42
+}
 ```
 
+本地直接编译（仓库根目录）：
 
-## Network网络
-```cpp
-class io_context;
-- void run() 
-- void run_in_current_thread()
-- void stop()
-- task<> schedule()
-- void spawn(task<T> t);
-- task<> sleep_for(std::chrono::duration<Req,Period> d)
-- rask<> sleep_for(std::chrono::duration<Req,Period> d,cancellation_token token)
-
-
-class endpoint;
-- static endpoint from_ip_port(std::string_view ip,uint16_t port)
-- static endpoint from_sockaddr(const sockaddr* addr,socklen_t len)
-- const sockaddr * data() 
-- socklen_t size() 
-- int family() 
-- std::string ip()
-- uint16_t port() 
-- std::string to_string()
-
-
-class byte_buffer;
-- size_t size() 
-- size_t capacity() 
-- std::span<const std::byte> data() 可读区域
-- std::span<std::byte> prepare(size_t n) 预留写入区域
-- void commit(size_t n) 写入完成
-- void consume(size_t n) 读取完成
-- void clear() 
-- void shrink_to_fit()
-
-struct mutable_buffer;
-- std::span<std::byte> bytes
-
-struct const_buffer;
-- std::span<const std::byte> bytes
-
-
-class socket;
-- socket(io_context & ctx,int fd)
-- static socket open_tcp(io_context & ctx,int family = AF_INET)
-- static socket open_udp(io_context & ctx,int family = AF_INET)
-- void set_nonblocking(bool on = true) 设置非阻塞
-- void set_reuse_addr(bool on = true) 设置地址重用
-- void set_reuse_port(bool on = true) 设置端口重用
-- void set_tcp_nodelay(bool on = true) 设置tcp Nagle算法
-- void bind(const endpoint& ep)
-- void listen(int backlog = SOMAXCONN)
-
-- task<> async_connect(const endpoint& ep)
-- task<> async_connect(const endpoint& ep,cancellation_token token)
-
-- task<size_t> async_read_some(mutable_buffer buf)
-- task<size_t> async_read_some(mutable_buffer buf,cancellation_token token)
-- task<size_t> async_read_exact(mutable_buffer buf)
-- task<size_t> async_read_exact(mutable_buffer buf,cancellation_token token)
-
-- task<size_t> async_write_some(const_buffer buf);
-- task<size_t> async_write_some(const_buffer buf, cancellation_token token);
-- task<size_t> async_write_all(const_buffer buf);
-- task<size_t> async_write_all(const_buffer buf, cancellation_token token);
-- int native_handle() 获取原始文件描述符
-- bool is_open()
-- void close() 
-
-
-class acceptor;
-- static acceptor bind(io_context & ctx,const endpoint& ep,int backlog=SOMAXCONN)
-- socket & native_socket()
-- task<socket> async_accept()
-- tasl<socket> async_accept(cancellation_token token)
-
-struct resolve_options;
-- int family = AF_UNSPEC 未指定地址族
-- int socktype = SOCK_STREAM
-- int flags = AI_ADDRCONFIG 根据本地址网络配置返回地址，只返回本地系统配置支持的地址族
-
-class resolver;
-static std::vector<endpoint> resolve(std::string_view host,std::string_view service,resolve_options opt = {})
-static task<std::vector<endpoint>> async_resolve(io_context & ctx,std::string host,std::string service, resolve_options opt = {}, cancellation_token token = {})
-
-
-
+```bash
+g++ -std=c++20 -O2 -pthread -I./include demo.cpp -o demo
+./demo
 ```
+
+### 2) `when_all`: 并发等待多个任务
+
+```cpp
+#include <tuple>
+#include <string>
+
+#include "xcoro/sync_wait.hpp"
+#include "xcoro/task.hpp"
+#include "xcoro/when_all.hpp"
+
+xcoro::task<int> first() { co_return 3; }
+xcoro::task<std::string> second() { co_return "ok"; }
+
+int main() {
+  auto result = xcoro::sync_wait(xcoro::when_all(first(), second()));
+  // result 是 std::tuple<int, std::string>
+  return (std::get<0>(result) == 3 && std::get<1>(result) == "ok") ? 0 : 1;
+}
+```
+
+### 3) `when_any`: 获取最先完成的任务
+
+```cpp
+#include <vector>
+
+#include "xcoro/manual_reset_event.hpp"
+#include "xcoro/sync_wait.hpp"
+#include "xcoro/task.hpp"
+#include "xcoro/when_any.hpp"
+
+xcoro::task<int> fast() {
+  co_return 7;
+}
+
+xcoro::task<int> slow(xcoro::manual_reset_event& gate) {
+  co_await gate;
+  co_return 42;
+}
+
+int main() {
+  xcoro::manual_reset_event gate;
+  auto result = xcoro::sync_wait(xcoro::when_any(fast(), slow(gate)));
+  // variadic 版本：result.index + result.get<Index>()
+  return (result.index == 0 && result.get<0>() == 7) ? 0 : 1;
+}
+```
+
+## Cancellation
+
+取消模型与 `cppcoro/libcoro` 常见设计一致：`source` 发起取消，`token` 传播取消状态，  
+await 点可抛 `operation_cancelled`。
+
+```cpp
+#include "xcoro/cancellation_source.hpp"
+#include "xcoro/semaphore.hpp"
+#include "xcoro/sync_wait.hpp"
+#include "xcoro/task.hpp"
+
+xcoro::task<void> wait_or_cancel(xcoro::semaphore& sem, xcoro::cancellation_token token) {
+  co_await sem.acquire(token);  // 若 token 已取消/过程中取消，会抛 operation_cancelled
+}
+
+int main() {
+  xcoro::semaphore sem(0);
+  xcoro::cancellation_source source;
+  try {
+    xcoro::sync_wait(wait_or_cancel(sem, source.token()));
+  } catch (const xcoro::operation_cancelled&) {
+    // cancelled
+  }
+}
+```
+
+## Networking (Linux)
+
+`net::io_context` 使用 `epoll + eventfd` 驱动 I/O，提供：
+
+- `schedule()`
+- `sleep_for(duration[, token])`
+- `async_read_some/read_exact`
+- `async_write_all`
+- `async_accept`
+- `async_connection`
+
+典型使用流程：
+
+1. 创建 `io_context`
+2. 调用 `run()` 启动事件循环线程（或 `run_in_current_thread()`）
+3. 提交 awaitable 任务（`sync_wait(...)` 或 `spawn(...)`）
+4. 调用 `stop()` 停止循环
+
+## Header Map
+
+常用头文件：
+
+- `xcoro/task.hpp`
+- `xcoro/sync_wait.hpp`
+- `xcoro/when_all.hpp`
+- `xcoro/when_any.hpp`
+- `xcoro/cancellation_source.hpp`
+- `xcoro/cancellation_token.hpp`
+- `xcoro/manual_reset_event.hpp`
+- `xcoro/semaphore.hpp`
+- `xcoro/mutex.hpp`
+- `xcoro/condition_variable.hpp`
+- `xcoro/latch.hpp`
+- `xcoro/generator.hpp`
+- `xcoro/thread_pool.hpp`
+- `xcoro/net/io_context.hpp`
+- `xcoro/net/socket.hpp`
+- `xcoro/net/acceptor.hpp`
+- `xcoro/net/resolver.hpp`
+- `xcoro/net/endpoint.hpp`
+- `xcoro/net/buffer.hpp`
+
+## CMake Integration
+
+当前仓库尚未导出安装后的 CMake package/target，推荐先以源码方式引入：
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+  xcoro
+  GIT_REPOSITORY https://github.com/<your-org>/xcoro.git
+  GIT_TAG main
+)
+FetchContent_MakeAvailable(xcoro)
+
+target_include_directories(your_target PRIVATE ${xcoro_SOURCE_DIR}/include)
+target_link_libraries(your_target PRIVATE Threads::Threads)
+```
+
+## Build And Test
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+当前测试覆盖包含：
+
+- `generator`
+- `cancellation`
+- `semaphore`
+- `mutex`
+- `condition_variable`
+- `latch`
+- `manual_reset_event`
+- `when_all`
+- `when_any`
+- `net::io_context/socket`
+
+## Important Notes
+
+### 1) 协程 Lambda 捕获生命周期
+
+请避免“带捕获的临时协程 lambda”直接调用，这会产生悬垂生命周期风险。  
+优先使用“无捕获协程 + 显式参数”。
+
+不推荐：
+
+```cpp
+tasks.push_back([&]() -> xcoro::task<int> {
+  co_await gate;
+  co_return 1;
+}()); // 捕获对象可能在挂起后已销毁
+```
+
+推荐：
+
+```cpp
+auto make_task = [](xcoro::manual_reset_event& ev) -> xcoro::task<int> {
+  co_await ev;
+  co_return 1;
+};
+tasks.push_back(make_task(gate));
+```
+
+### 2) API 稳定性
+
+该项目处于持续迭代阶段，接口命名与行为可能调整。  
+若用于生产，请固定 commit 并结合你的场景补充压力测试。
+
+## Roadmap
+
+- 导出正式 CMake target（`install()/find_package()`）
+- 增加跨平台 I/O 后端（当前网络模块偏 Linux）
+- 补充更多文档与示例（HTTP client/server、超时控制、背压策略）
+- 强化并发压力测试与 sanitizer 测试矩阵
