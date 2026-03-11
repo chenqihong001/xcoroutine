@@ -1172,19 +1172,21 @@ public:
       std::lock_guard<std::mutex> guard(mutex_);
       for (std::ptrdiff_t i = 0; i < n; ++i) {
         bool resumed = false;
-        while (!waiters_.empty()) {
-          auto waiter = waiters_.front();
-          waiters_.pop();
-          if (!waiter || !waiter->try_mark_resumed()) {
-            continue;
+        
+          while (!waiters_.empty()) {
+            auto waiter = waiters_.front();
+            waiters_.pop();
+            if (!waiter || !waiter->try_mark_resumed()) {
+              continue;
+            }
+            to_resume.push_back(waiter->handle);
+            resumed = true;
+            break;
           }
-          to_resume.push_back(waiter->handle);
-          resumed = true;
-          break;
-        }
-        if (!resumed) {
-          ++count_;
-        }
+
+          if (!resumed) {
+            ++count_;
+          }
       }
     }
 
@@ -1293,6 +1295,10 @@ private:
 
 } // namespace xcoro
 ```
+
+
+
+
 
 ### 15.2 `include/xcoro/mutex.hpp`
 

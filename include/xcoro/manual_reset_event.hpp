@@ -9,10 +9,10 @@ namespace xcoro {
  * 允许多个协程等待同一个事件，当事件被触发时，所有等待协程会被恢复执行
  * @note 线程安全，可在多线程环境中使用
  */
-class event {
+class manual_reset_event {
  public:
   struct awaiter {
-    awaiter(const event& e) : event_(e) {}
+    awaiter(const manual_reset_event& e) : event_(e) {}
 
     bool await_ready() const noexcept { return event_.is_set(); }
     bool await_suspend(std::coroutine_handle<> awaiting_handle) noexcept {
@@ -35,10 +35,10 @@ class event {
     void await_resume() noexcept {}
     awaiter* next_;                               // 下一个等待者（链表结构）
     std::coroutine_handle<> awaiting_coroutine_;  // 等待的协程句柄
-    const event& event_;                          // 关联的事件
+    const manual_reset_event& event_;             // 关联的事件
   };
 
-  explicit event() : state_(nullptr) {}
+  explicit manual_reset_event() : state_(nullptr) {}
 
   // 检查事件是否已触发
   bool is_set() const noexcept { return state_.load(std::memory_order_acquire) == this; }
@@ -60,7 +60,7 @@ class event {
   }
 
   auto operator co_await() const noexcept {
-    // static_assert(std::is_same_v<decltype(*this), const event &>);
+    // static_assert(std::is_same_v<decltype(*this), const manual_reset_event &>);
     return awaiter{*this};
   }
 
@@ -74,5 +74,7 @@ class event {
   mutable std::atomic<void*> state_;
   friend class awaiter;
 };
+
+using event = manual_reset_event;
 
 }  // namespace xcoro

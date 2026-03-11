@@ -1,11 +1,17 @@
 #pragma once
+
 #include <atomic>
 #include <coroutine>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <utility>
 #include <vector>
+
+#include "xcoro/cancellation_registration.hpp"
+#include "xcoro/cancellation_token.hpp"
+#include "xcoro/mutex.hpp"
 
 namespace xcoro {
 
@@ -17,13 +23,37 @@ class condition_variable {
 
  private:
   struct waiter_state {
+    enum class suspend_state : std::uint8_t {
+      waiting_await_suspend,
+      suspended,
+      wake_requested,
+    };
+
     std::coroutine_handle<> handle{};
-    mutex* mutex{};
+    mutex* associated_mutex{};
     std::atomic<bool> resumed{false};
     std::atomic<bool> cancelled{false};
+    std::atomic<suspend_state> suspend_phase{suspend_state::waiting_await_suspend};
 
     bool try_mark_resumed() noexcept {
       return !resumed.exchange(true, std::memory_order_acq_rel);
+    }
+
+    bool try_mark_suspended() noexcept {
+      auto expected = suspend_state::waiting_await_suspend;
+      return suspend_phase.compare_exchange_strong(expected, suspend_state::suspended,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_acquire);
+    }
+
+    bool should_resume_now() noexcept {
+      auto expected = suspend_state::waiting_await_suspend;
+      if (suspend_phase.compare_exchange_strong(expected, suspend_state::wake_requested,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+        return false;
+      }
+      return expected == suspend_state::suspended;
     }
   };
 
@@ -46,26 +76,34 @@ class condition_variable {
         return false;
       }
 
-      state_ = std::make_shared<waiter_state>();
-      state_->handle = handle;
-      state_->mutex = &mutex_;
-      cv_.enqueue_waiter(state_);
+      auto state = std::make_shared<waiter_state>();
+      state->handle = handle;
+      state->associated_mutex = &mutex_;
+      cv_.enqueue_waiter(state);
       mutex_.unlock();
+      state_ = state;
 
       if (token_.can_be_cancelled()) {
         registration_ = cancellation_registration(
-            token_, [state = state_]() noexcept {
+            token_, [state]() noexcept {
               if (!state->try_mark_resumed()) {
                 return;
               }
               state->cancelled.store(true, std::memory_order_release);
-              if (state->mutex) {
-                state->mutex->lock_and_resume(state->handle);
+              if (!state->should_resume_now()) {
+                return;
+              }
+              if (state->associated_mutex) {
+                state->associated_mutex->lock_and_resume(state->handle);
               }
             });
       }
 
-      return true;
+      if (state->try_mark_suspended()) {
+        return true;
+      }
+
+      return mutex_.lock_or_enqueue(handle);
     }
 
     void await_resume() {
@@ -89,7 +127,7 @@ class condition_variable {
     return awaiter{*this, m, std::move(token)};
   }
 
-  void notify_one() {
+  void notify_one() noexcept {
     std::shared_ptr<waiter_state> w;
     {
       std::lock_guard<std::mutex> guard(mutex_);
@@ -103,12 +141,13 @@ class condition_variable {
         break;
       }
     }
-    if (w && w->mutex) {
-      w->mutex->lock_and_resume(w->handle);
+
+    if (w && w->associated_mutex && w->should_resume_now()) {
+      w->associated_mutex->lock_and_resume(w->handle);
     }
   }
 
-  void notify_all() {
+  void notify_all() noexcept {
     std::vector<std::shared_ptr<waiter_state>> to_resume;
     {
       std::lock_guard<std::mutex> guard(mutex_);
@@ -121,15 +160,16 @@ class condition_variable {
         to_resume.push_back(std::move(w));
       }
     }
+
     for (auto& w : to_resume) {
-      if (w && w->mutex) {
-        w->mutex->lock_and_resume(w->handle);
+      if (w && w->associated_mutex && w->should_resume_now()) {
+        w->associated_mutex->lock_and_resume(w->handle);
       }
     }
   }
 
  private:
-  void enqueue_waiter(const std::shared_ptr<waiter_state>& w) {
+  void enqueue_waiter(const std::shared_ptr<waiter_state>& w) noexcept {
     std::lock_guard<std::mutex> guard(mutex_);
     waiters_.push(w);
   }

@@ -3,6 +3,8 @@
 本库提供若干常用协程同步原语，均为 header-only：
 
 - `semaphore`（计数信号量）
+- `counting_semaphore`（带上限的计数信号量，标准库语义）
+- `binary_semaphore`（单许可信号量）
 - `mutex`（协程互斥锁）
 - `condition_variable`（协程条件变量）
 - `latch`（倒计时门闩）
@@ -36,6 +38,11 @@ auto work = [&]() -> xcoro::task<> {
 - `acquire()` 返回 awaiter
 - `release(n)` 可一次释放多个
 - 支持 `acquire(token)` 取消等待
+
+说明：
+- `semaphore` 是 `counting_semaphore<>` 的兼容别名
+- `counting_semaphore<LeastMaxValue>::max()` 返回计数上限
+- `binary_semaphore` 等价于 `counting_semaphore<1>`
 
 ---
 

@@ -1,22 +1,25 @@
 #pragma once
 
-#include "xcoroutine/cancellation.hpp"
 #include <atomic>
 #include <coroutine>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <utility>
+
+#include "xcoro/cancellation_registration.hpp"
+#include "xcoro/cancellation_token.hpp"
 
 namespace xcoro {
 
 class condition_variable;
 
 class mutex {
-public:
+ public:
   mutex() = default;
-  mutex(const mutex &) = delete;
-  mutex &operator=(const mutex &) = delete;
+  mutex(const mutex&) = delete;
+  mutex& operator=(const mutex&) = delete;
 
   bool try_lock() noexcept {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -29,6 +32,7 @@ public:
 
   void unlock() noexcept {
     std::coroutine_handle<> next;
+    bool handed_off = false;
     {
       std::lock_guard<std::mutex> guard(mutex_);
       while (!waiters_.empty()) {
@@ -37,33 +41,62 @@ public:
         if (!waiter || !waiter->try_mark_resumed()) {
           continue;
         }
-        next = waiter->handle;
+        handed_off = true;
+        if (waiter->should_resume_now()) {
+          next = waiter->handle;
+        }
         break;
       }
-      if (!next) {
+
+      if (!handed_off) {
         locked_ = false;
         return;
       }
     }
+
     if (next) {
       next.resume();
     }
   }
 
-private:
+ private:
   struct waiter_state {
+    enum class suspend_state : std::uint8_t {
+      waiting_await_suspend,
+      suspended,
+      wake_requested,
+    };
+
     std::coroutine_handle<> handle{};
     std::atomic<bool> resumed{false};
     std::atomic<bool> cancelled{false};
+    std::atomic<suspend_state> suspend_phase{suspend_state::waiting_await_suspend};
 
     bool try_mark_resumed() noexcept {
       return !resumed.exchange(true, std::memory_order_acq_rel);
     }
+
+    bool try_mark_suspended() noexcept {
+      auto expected = suspend_state::waiting_await_suspend;
+      return suspend_phase.compare_exchange_strong(expected, suspend_state::suspended,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_acquire);
+    }
+
+    bool should_resume_now() noexcept {
+      auto expected = suspend_state::waiting_await_suspend;
+      if (suspend_phase.compare_exchange_strong(expected, suspend_state::wake_requested,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+        return false;
+      }
+      return expected == suspend_state::suspended;
+    }
   };
 
-public:
+ public:
   struct awaiter {
-    awaiter(mutex &m, cancellation_token token = {}) noexcept
+    awaiter(mutex& m, cancellation_token token = {}) noexcept
         : mutex_(m), token_(std::move(token)) {}
 
     bool await_ready() noexcept {
@@ -80,34 +113,30 @@ public:
         return false;
       }
 
-      state_ = std::make_shared<waiter_state>();
-      state_->handle = handle;
-      if (!mutex_.enqueue_waiter(state_)) {
-        state_.reset();
+      auto state = std::make_shared<waiter_state>();
+      state->handle = handle;
+      if (!mutex_.enqueue_waiter(state)) {
         return false;
       }
+      state_ = state;
 
       if (token_.can_be_cancelled()) {
         registration_ = cancellation_registration(
-            token_, [state = state_]() noexcept {
+            token_, [state]() noexcept {
               if (!state->try_mark_resumed()) {
                 return;
               }
               state->cancelled.store(true, std::memory_order_release);
+              if (!state->should_resume_now()) {
+                return;
+              }
               if (state->handle) {
                 state->handle.resume();
               }
             });
       }
 
-      if (token_.can_be_cancelled() && token_.is_cancellation_requested()) {
-        if (state_->try_mark_resumed()) {
-          state_->cancelled.store(true, std::memory_order_release);
-        }
-        return false;
-      }
-
-      return true;
+      return state->try_mark_suspended();
     }
 
     void await_resume() {
@@ -117,8 +146,8 @@ public:
       }
     }
 
-  private:
-    mutex &mutex_;
+   private:
+    mutex& mutex_;
     cancellation_token token_;
     cancellation_registration registration_;
     std::shared_ptr<waiter_state> state_;
@@ -128,8 +157,8 @@ public:
   auto lock() noexcept { return awaiter{*this}; }
   auto lock(cancellation_token token) noexcept { return awaiter{*this, std::move(token)}; }
 
-private:
-  bool enqueue_waiter(const std::shared_ptr<waiter_state> &state) noexcept {
+ private:
+  bool enqueue_waiter(const std::shared_ptr<waiter_state>& state) noexcept {
     std::lock_guard<std::mutex> guard(mutex_);
     if (!locked_) {
       locked_ = true;
@@ -139,17 +168,23 @@ private:
     return true;
   }
 
-  void lock_and_resume(std::coroutine_handle<> handle) noexcept {
+  bool lock_or_enqueue(std::coroutine_handle<> handle) noexcept {
+    auto state = std::make_shared<waiter_state>();
+    state->handle = handle;
     {
       std::lock_guard<std::mutex> guard(mutex_);
       if (!locked_) {
         locked_ = true;
-      } else {
-        auto state = std::make_shared<waiter_state>();
-        state->handle = handle;
-        waiters_.push(std::move(state));
-        return;
+        return false;
       }
+      waiters_.push(state);
+    }
+    return state->try_mark_suspended();
+  }
+
+  void lock_and_resume(std::coroutine_handle<> handle) noexcept {
+    if (lock_or_enqueue(handle)) {
+      return;
     }
     if (handle) {
       handle.resume();
@@ -163,4 +198,5 @@ private:
   friend class condition_variable;
 };
 
-} // namespace xcoro
+}  // namespace xcoro
+
