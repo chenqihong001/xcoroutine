@@ -129,18 +129,18 @@ class completion_state {
 
 template <typename Result, typename MakeResult>
 void publish_result_if_first(const std::shared_ptr<completion_state<Result>>& state,
-                             manual_reset_event& notify_event,
+                             const std::shared_ptr<manual_reset_event>& notify_event,
                              std::size_t index,
                              MakeResult&& make_result) {
   if (state->try_publish_result(index, make_result())) {
-    notify_event.set();
+    notify_event->set();
   }
 }
 
 template <typename Result, std::size_t Index, concepts::Awaitable Awaitable>
 detached_task spawn_when_any_task(Awaitable awaitable,
                                   std::shared_ptr<completion_state<Result>> state,
-                                  manual_reset_event& notify_event) {
+                                  std::shared_ptr<manual_reset_event> notify_event) {
   try {
     using await_result_t = awaiter_result_t<Awaitable>;
     if constexpr (std::is_void_v<await_result_t>) {
@@ -161,7 +161,7 @@ detached_task spawn_when_any_task(Awaitable awaitable,
     }
   } catch (...) {
     if (state->try_publish_exception(Index, std::current_exception())) {
-      notify_event.set();
+      notify_event->set();
     }
   }
 }
@@ -169,7 +169,7 @@ detached_task spawn_when_any_task(Awaitable awaitable,
 template <typename Result, concepts::Awaitable Awaitable>
 detached_task spawn_when_any_range_task(Awaitable awaitable,
                                         std::shared_ptr<completion_state<Result>> state,
-                                        manual_reset_event& notify_event,
+                                        std::shared_ptr<manual_reset_event> notify_event,
                                         std::size_t index) {
   try {
     using await_result_t = awaiter_result_t<Awaitable>;
@@ -186,7 +186,7 @@ detached_task spawn_when_any_range_task(Awaitable awaitable,
     }
   } catch (...) {
     if (state->try_publish_exception(index, std::current_exception())) {
-      notify_event.set();
+      notify_event->set();
     }
   }
 }
@@ -194,7 +194,7 @@ detached_task spawn_when_any_range_task(Awaitable awaitable,
 template <typename Result, typename... Awaitables, std::size_t... Indices>
 void spawn_when_any_variadic_impl(std::index_sequence<Indices...>,
                                   const std::shared_ptr<completion_state<Result>>& state,
-                                  manual_reset_event& notify_event,
+                                  const std::shared_ptr<manual_reset_event>& notify_event,
                                   Awaitables&&... awaitables) {
   (spawn_when_any_task<Result, Indices, Awaitables>(std::forward<Awaitables>(awaitables), state,
                                                      notify_event),
@@ -203,7 +203,7 @@ void spawn_when_any_variadic_impl(std::index_sequence<Indices...>,
 
 template <typename Result, typename... Awaitables>
 void spawn_when_any_variadic(const std::shared_ptr<completion_state<Result>>& state,
-                             manual_reset_event& notify_event,
+                             const std::shared_ptr<manual_reset_event>& notify_event,
                              Awaitables&&... awaitables) {
   spawn_when_any_variadic_impl<Result>(std::index_sequence_for<Awaitables...>{}, state,
                                        notify_event, std::forward<Awaitables>(awaitables)...);
@@ -215,7 +215,7 @@ task<when_any_result<Awaitables...>> when_any_variadic_owned(
   using result_t = when_any_result<Awaitables...>;
 
   auto state = std::make_shared<completion_state<result_t>>();
-  manual_reset_event notify;
+  auto notify = std::make_shared<manual_reset_event>();
 
   std::apply(
       [&](auto&... owned_awaitables) {
@@ -224,7 +224,7 @@ task<when_any_result<Awaitables...>> when_any_variadic_owned(
       },
       awaitables);
 
-  co_await notify;
+  co_await *notify;
   if (state->has_exception()) {
     std::rethrow_exception(state->exception());
   }
@@ -291,7 +291,7 @@ template <std::ranges::range RangeType,
 [[nodiscard]] task<when_any_range_result<Awaitable>> when_any(RangeType awaitables) {
   using result_t = when_any_range_result<Awaitable>;
   auto state = std::make_shared<detail::completion_state<result_t>>();
-  manual_reset_event notify;
+  auto notify = std::make_shared<manual_reset_event>();
 
   std::size_t index = 0;
   for (auto& awaitable : awaitables) {
@@ -303,7 +303,7 @@ template <std::ranges::range RangeType,
     throw std::runtime_error("when_any requires at least one awaitable");
   }
 
-  co_await notify;
+  co_await *notify;
   if (state->has_exception()) {
     std::rethrow_exception(state->exception());
   }

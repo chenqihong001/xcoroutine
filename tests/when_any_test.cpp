@@ -34,12 +34,13 @@ TEST(WhenAnyTest, ReturnsFirstCompletedResult) {
 
 TEST(WhenAnyTest, RangeOverloadReturnsFirstCompletedResult) {
   manual_reset_event gate;
+  auto gated_task = [](manual_reset_event& event) -> task<int> {
+    co_await event;
+    co_return 1;
+  };
 
   std::vector<task<int>> tasks;
-  tasks.push_back([&]() -> task<int> {
-    co_await gate;
-    co_return 1;
-  }());
+  tasks.push_back(gated_task(gate));
   tasks.push_back([]() -> task<int> {
     co_return 2;
   }());
@@ -81,4 +82,3 @@ TEST(WhenAnyTest, CancellationOverloadCancelsLosers) {
   }
   EXPECT_TRUE(loser_cancelled.load(std::memory_order_acquire));
 }
-
