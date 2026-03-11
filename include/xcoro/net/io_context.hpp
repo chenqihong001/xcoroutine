@@ -2,6 +2,7 @@
 #include <asm-generic/errno.h>
 #include <asm-generic/socket.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -40,16 +41,43 @@ enum io_event {
 };
 
 inline ssize_t write_no_sigpipe(int fd, const void* buffer, size_t count) {
+  auto write_with_blocked_sigpipe = [&](int out_fd, const void* out_buffer, size_t out_count) -> ssize_t {
+    sigset_t sigpipe_set;
+    sigset_t old_set;
+    ::sigemptyset(&sigpipe_set);
+    ::sigaddset(&sigpipe_set, SIGPIPE);
+    if (::pthread_sigmask(SIG_BLOCK, &sigpipe_set, &old_set) != 0) {
+      return ::write(out_fd, out_buffer, out_count);
+    }
+
+    ssize_t n = ::write(out_fd, out_buffer, out_count);
+    const int saved_errno = errno;
+
+    if (n == -1 && saved_errno == EPIPE) {
+      timespec timeout{0, 0};
+      while (::sigtimedwait(&sigpipe_set, nullptr, &timeout) == -1 && errno == EINTR) {
+      }
+    }
+
+    (void)::pthread_sigmask(SIG_SETMASK, &old_set, nullptr);
+    errno = saved_errno;
+    return n;
+  };
+
 #ifdef MSG_NOSIGNAL
   ssize_t n = ::send(fd, buffer, count, MSG_NOSIGNAL);
   if (n >= 0) {
     return n;
   }
-  if (errno != ENOTSOCK) {
-    return -1;
+  if (errno == ENOTSOCK) {
+    return write_with_blocked_sigpipe(fd, buffer, count);
   }
+  if (errno == EPERM) {
+    return write_with_blocked_sigpipe(fd, buffer, count);
+  }
+  return -1;
 #endif
-  return ::write(fd, buffer, count);
+  return write_with_blocked_sigpipe(fd, buffer, count);
 }
 
 class io_awaiter;
@@ -131,7 +159,7 @@ class io_context {
   std::mutex ready_mtx_;
   std::queue<std::coroutine_handle<>> ready_;
   std::mutex timer_mtx_;
-  std::priority_queue<timer_item, std::vector<timer_item>> timers_;
+  std::priority_queue<timer_item, std::vector<timer_item>, timer_cmp> timers_;
 };
 
 class io_awaiter {
@@ -363,6 +391,14 @@ inline task<> io_context::schedule() {
 
 inline task<size_t> io_context::async_read_some(int fd, void* buffer, size_t count) {
   co_return co_await async_read_some(fd, buffer, count, cancellation_token{});
+}
+
+inline task<size_t> io_context::async_read_exact(int fd, void* buffer, size_t count) {
+  co_return co_await async_read_exact(fd, buffer, count, cancellation_token{});
+}
+
+inline task<size_t> io_context::async_write_all(int fd, const void* buffer, size_t count) {
+  co_return co_await async_write_all(fd, buffer, count, cancellation_token{});
 }
 
 inline task<size_t> io_context::async_read_some(int fd, void* buffer, size_t count, cancellation_token token) {

@@ -20,6 +20,7 @@ enable_testing()
 set(TEST_FILES
  "tests/generator_test.cpp"
  "tests/cancellation_test.cpp"
+ "tests/net_test.cpp"
  "tests/semaphore_test.cpp"
  "tests/mutex_test.cpp"
  "tests/condition_variable_test.cpp"
