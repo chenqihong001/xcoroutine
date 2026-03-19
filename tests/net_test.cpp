@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <future>
+#include <string>
 #include <thread>
 
 #include <fcntl.h>
@@ -52,6 +53,19 @@ class scoped_fd {
  private:
   int fd_{-1};
 };
+
+std::string collect_bytes(const byte_buffer& buf) {
+  std::string out;
+  const auto regions = buf.readable_regions();
+  out.reserve(regions[0].size() + regions[1].size());
+  for (std::byte b : regions[0]) {
+    out.push_back(static_cast<char>(b));
+  }
+  for (std::byte b : regions[1]) {
+    out.push_back(static_cast<char>(b));
+  }
+  return out;
+}
 
 }  // namespace
 
@@ -189,4 +203,56 @@ TEST(NetTest, AsyncWriteAllToClosedPeerReturnsErrorNotSignal) {
     got_expected_error = (e.code().value() == EPIPE || e.code().value() == ECONNRESET);
   }
   EXPECT_TRUE(got_expected_error);
+}
+
+TEST(NetTest, ByteBufferPrepareRegionsWrapsWithoutReordering) {
+  byte_buffer buf(8);
+
+  auto first = buf.prepare(6);
+  ASSERT_EQ(first.size(), 6u);
+  constexpr std::array<std::byte, 6> prefix = {std::byte{'a'}, std::byte{'b'}, std::byte{'c'},
+                                                std::byte{'d'}, std::byte{'e'}, std::byte{'f'}};
+  std::memcpy(first.data(), prefix.data(), prefix.size());
+  buf.commit(prefix.size());
+
+  buf.consume(5);
+  ASSERT_EQ(buf.size(), 1u);
+
+  auto writable = buf.prepare_regions(4);
+  ASSERT_EQ(writable[0].size(), 2u);
+  ASSERT_EQ(writable[1].size(), 2u);
+
+  constexpr std::array<std::byte, 2> s1 = {std::byte{'g'}, std::byte{'h'}};
+  constexpr std::array<std::byte, 2> s2 = {std::byte{'i'}, std::byte{'j'}};
+  std::memcpy(writable[0].data(), s1.data(), s1.size());
+  std::memcpy(writable[1].data(), s2.data(), s2.size());
+  buf.commit(4);
+
+  EXPECT_EQ(buf.size(), 5u);
+  EXPECT_EQ(collect_bytes(buf), "fghij");
+}
+
+TEST(NetTest, ByteBufferPrepareKeepsContiguousContract) {
+  byte_buffer buf(8);
+
+  auto first = buf.prepare(6);
+  ASSERT_EQ(first.size(), 6u);
+  constexpr std::array<std::byte, 6> prefix = {std::byte{'a'}, std::byte{'b'}, std::byte{'c'},
+                                                std::byte{'d'}, std::byte{'e'}, std::byte{'f'}};
+  std::memcpy(first.data(), prefix.data(), prefix.size());
+  buf.commit(prefix.size());
+
+  buf.consume(5);
+  ASSERT_EQ(buf.size(), 1u);
+
+  auto contiguous = buf.prepare(4);
+  ASSERT_EQ(contiguous.size(), 4u);
+  constexpr std::array<std::byte, 4> suffix = {std::byte{'g'}, std::byte{'h'}, std::byte{'i'}, std::byte{'j'}};
+  std::memcpy(contiguous.data(), suffix.data(), suffix.size());
+  buf.commit(suffix.size());
+
+  const auto regions = buf.readable_regions();
+  EXPECT_EQ(regions[0].size(), 5u);
+  EXPECT_EQ(regions[1].size(), 0u);
+  EXPECT_EQ(collect_bytes(buf), "fghij");
 }

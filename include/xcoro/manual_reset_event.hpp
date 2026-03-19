@@ -75,6 +75,4 @@ class manual_reset_event {
   friend class awaiter;
 };
 
-using event = manual_reset_event;
-
 }  // namespace xcoro

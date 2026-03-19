@@ -1,11 +1,10 @@
-#include "xcoro/manual_reset_event.hpp"
-
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <future>
 #include <thread>
 
+#include "xcoro/manual_reset_event.hpp"
 #include "xcoro/sync_wait.hpp"
 #include "xcoro/task.hpp"
 
@@ -37,7 +36,7 @@ TEST(EventTest, SetResumesSingleWaiter) {
 }
 
 TEST(EventTest, SetIsStickyForFutureWaiters) {
-  event ev;
+  manual_reset_event ev;
   ev.set();
   EXPECT_TRUE(ev.is_set());
 
@@ -79,4 +78,3 @@ TEST(EventTest, SetResumesAllCurrentWaiters) {
 
   EXPECT_EQ(resumed_count.load(std::memory_order_acquire), 2);
 }
-

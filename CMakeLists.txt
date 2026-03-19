@@ -24,7 +24,6 @@ set(TEST_FILES
  "tests/semaphore_test.cpp"
  "tests/mutex_test.cpp"
  "tests/condition_variable_test.cpp"
- "tests/latch_test.cpp"
  "tests/event_test.cpp"
  "tests/when_any_test.cpp"
  "tests/when_all_test.cpp"

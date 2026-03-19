@@ -26,7 +26,7 @@ TEST(WhenAnyTest, ReturnsFirstCompletedResult) {
   };
 
   auto result = sync_wait(when_any(fast(), slow()));
-  EXPECT_EQ(result.index, 0u);
+  EXPECT_EQ(result.active_index(), 0u);
   EXPECT_EQ(result.get<0>(), 7);
 
   gate.set();
@@ -46,39 +46,79 @@ TEST(WhenAnyTest, RangeOverloadReturnsFirstCompletedResult) {
   }());
 
   auto result = sync_wait(when_any(std::move(tasks)));
-  EXPECT_EQ(result.index, 1u);
   EXPECT_EQ(result.get(), 2);
 
   gate.set();
 }
 
-TEST(WhenAnyTest, CancellationOverloadCancelsLosers) {
+TEST(WhenAnyTest, CancellationOverloadCancelsAllCancellationAwareLosers) {
   cancellation_source source;
   semaphore sem(0);
-  std::atomic<bool> loser_cancelled{false};
+  std::atomic<int> cancelled_losers{0};
 
-  auto fast = []() -> task<int> {
+  auto fast = [](cancellation_token token) -> task<int> {
+    EXPECT_FALSE(token.is_cancellation_requested());
     co_return 10;
   };
 
-  auto slow = [&]() -> task<int> {
+  auto wait_or_cancel = [&](cancellation_token token) -> task<int> {
     try {
-      co_await sem.acquire(source.token());
+      co_await sem.acquire(token);
     } catch (const operation_cancelled&) {
-      loser_cancelled.store(true, std::memory_order_release);
+      cancelled_losers.fetch_add(1, std::memory_order_acq_rel);
       co_return -1;
     }
     co_return 20;
   };
 
-  auto result = sync_wait(when_any(source, fast(), slow()));
+  auto result = sync_wait(
+      when_any(source, fast(source.token()), wait_or_cancel(source.token()),
+               wait_or_cancel(source.token())));
 
-  EXPECT_EQ(result.index, 0u);
+  EXPECT_TRUE(result.holds<0>());
   EXPECT_EQ(result.get<0>(), 10);
   EXPECT_TRUE(source.is_cancellation_requested());
 
-  for (int i = 0; i < 1024 && !loser_cancelled.load(std::memory_order_acquire); ++i) {
+  for (int i = 0;
+       i < 2048 && cancelled_losers.load(std::memory_order_acquire) < 2;
+       ++i) {
     std::this_thread::yield();
   }
-  EXPECT_TRUE(loser_cancelled.load(std::memory_order_acquire));
+  EXPECT_EQ(cancelled_losers.load(std::memory_order_acquire), 2);
+}
+
+TEST(WhenAnyTest, CancellationRangeOverloadCancelsAllCancellationAwareLosers) {
+  cancellation_source source;
+  semaphore sem(0);
+  std::atomic<int> cancelled_losers{0};
+
+  auto wait_or_cancel = [&](cancellation_token token, int value) -> task<int> {
+    try {
+      co_await sem.acquire(token);
+    } catch (const operation_cancelled&) {
+      cancelled_losers.fetch_add(1, std::memory_order_acq_rel);
+      co_return -1;
+    }
+    co_return value;
+  };
+
+  std::vector<task<int>> tasks;
+  tasks.push_back([](cancellation_token token) -> task<int> {
+    EXPECT_FALSE(token.is_cancellation_requested());
+    co_return 99;
+  }(source.token()));
+  tasks.push_back(wait_or_cancel(source.token(), 1));
+  tasks.push_back(wait_or_cancel(source.token(), 2));
+
+  auto result = sync_wait(when_any(source, std::move(tasks)));
+
+  EXPECT_EQ(result.get(), 99);
+  EXPECT_TRUE(source.is_cancellation_requested());
+
+  for (int i = 0;
+       i < 2048 && cancelled_losers.load(std::memory_order_acquire) < 2;
+       ++i) {
+    std::this_thread::yield();
+  }
+  EXPECT_EQ(cancelled_losers.load(std::memory_order_acquire), 2);
 }

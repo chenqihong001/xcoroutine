@@ -114,8 +114,8 @@ xcoro::task<int> slow(xcoro::manual_reset_event& gate) {
 int main() {
   xcoro::manual_reset_event gate;
   auto result = xcoro::sync_wait(xcoro::when_any(fast(), slow(gate)));
-  // variadic 版本：result.index + result.get<Index>()
-  return (result.index == 0 && result.get<0>() == 7) ? 0 : 1;
+  // variadic 版本：result.active_index() + result.get<Index>()
+  return (result.active_index() == 0 && result.get<0>() == 7) ? 0 : 1;
 }
 ```
 
